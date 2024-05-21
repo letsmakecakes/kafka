@@ -81,6 +81,7 @@ public class OpenSearchConsumer {
         properties.setProperty("value.deserializer", StringDeserializer.class.getName());
         properties.setProperty("group.id", groupId);
         properties.setProperty("auto.offset.reset", "latest");
+        properties.setProperty("enable.auto.commit", "false");
 
         // create a consumer
         KafkaConsumer<String, String> consumer = new KafkaConsumer<>(properties);
@@ -130,8 +131,12 @@ public class OpenSearchConsumer {
                     IndexResponse response = openSearchClient.index(indexRequest, RequestOptions.DEFAULT);
 
 
-                    log.info(response.getId());
+                    //log.info(response.getId());
                 }
+
+                // commit offset after the batch is consumed
+                consumer.commitSync();
+                log.info("offsets have been committed");
             }
         } catch (Exception e) {
 
