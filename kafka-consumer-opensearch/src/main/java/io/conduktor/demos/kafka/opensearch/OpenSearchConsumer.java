@@ -10,7 +10,10 @@ import org.apache.http.impl.client.DefaultConnectionKeepAliveStrategy;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import org.opensearch.action.bulk.BulkRequest;
+import org.opensearch.action.bulk.BulkResponse;
 import org.opensearch.action.index.IndexRequest;
 import org.opensearch.action.index.IndexResponse;
 import org.opensearch.client.RequestOptions;
@@ -98,6 +101,24 @@ public class OpenSearchConsumer {
         // create our kafka client
         KafkaConsumer<String, String> consumer = createKafaConsumer();
 
+        // get a reference to the main thread
+        final Thread mainThread = Thread.currentThread();
+
+        // adding the shutdown hook
+        Runtime.getRuntime().addShutdownHook(new Thread() {
+            public void run() {
+                log.info("Detected shutdown, let's exit calling consumer.wakeup()...");
+                consumer.wakeup();
+
+                // join the main thread to allow the execution of the code in the main thread
+                try {
+                    mainThread.join();
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+        });
+
         // we need to create the index on OpenSearch if it doesn't exit already
         try(openSearchClient; consumer) {
             boolean indexExists = openSearchClient.indices().exists(new GetIndexRequest("wikimedia"), RequestOptions.DEFAULT);
@@ -116,6 +137,8 @@ public class OpenSearchConsumer {
                 int recordCount = records.count();
                 log.info("Received " + recordCount + " records");
 
+                BulkRequest bulkRequest = new BulkRequest();
+
                 for(ConsumerRecord<String, String> record: records) {
                     // send the record into Opensearch
 
@@ -128,18 +151,34 @@ public class OpenSearchConsumer {
                     String id = extractID(record.value());
 
                     IndexRequest indexRequest = new IndexRequest("wikimedia").source(record.value(), XContentType.JSON).id(id);
-                    IndexResponse response = openSearchClient.index(indexRequest, RequestOptions.DEFAULT);
-
-
+                    // IndexResponse response = openSearchClient.index(indexRequest, RequestOptions.DEFAULT);
+                    bulkRequest.add(indexRequest);
                     //log.info(response.getId());
                 }
 
-                // commit offset after the batch is consumed
-                consumer.commitSync();
-                log.info("offsets have been committed");
-            }
-        } catch (Exception e) {
+                if (bulkRequest.numberOfActions() > 0) {
+                    BulkResponse bulkResponse = openSearchClient.bulk(bulkRequest, RequestOptions.DEFAULT);
+                    log.info("inserted {} record(s)", bulkResponse.getItems().length);
+                    try {
+                        Thread.sleep(1000);
 
+                    } catch(InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                    // commit offset after the batch is consumed
+                    consumer.commitSync();
+                    log.info("offsets have been committed");
+                }
+
+            }
+        } catch (WakeupException e) {
+          log.info("consumer is starting to shutdown");
+        } catch (Exception e) {
+            log.error("unexpected exception in the consumer", e);
+        } finally {
+            consumer.close();
+            openSearchClient.close();
+            log.info("the consumer is now gracefully shutdown");
         }
 
 
